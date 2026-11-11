@@ -1,0 +1,47 @@
+# Personal GitHub -> organization, main branch only.
+# This file belongs in the organization repository, not the personal repository.
+name: Sync personal main
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-personal-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'OpenMind-AI-Technologies-Limited/OpenMindAI'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout organization main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge personal main without overwriting organization commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add personal 'https://github.com/smshagor-dev/OpenMindAI.git'
+          git fetch --no-tags personal '+refs/heads/main:refs/remotes/personal/main'
+
+          if git merge-base --is-ancestor refs/remotes/personal/main HEAD; then
+            echo 'Organization already includes personal main.'
+            exit 0
+          fi
+
+          if ! git merge-base HEAD refs/remotes/personal/main >/dev/null; then
+            echo 'Repositories have unrelated history. Refusing to overwrite.' >&2
+            exit 1
+          fi
+
+          git merge --no-edit --no-ff refs/remotes/personal/main
+          git push origin HEAD:main
