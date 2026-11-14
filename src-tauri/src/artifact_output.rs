@@ -1,3 +1,5 @@
+#[path = "docx_integrity.rs"]
+mod docx_integrity;
 #[path = "pdf_integrity.rs"]
 mod pdf_integrity;
 
@@ -10,6 +12,7 @@ use std::{
     fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// Create beneath an acquired root capability; never create via a checked path.
@@ -40,6 +43,7 @@ pub fn reserve_directory(root: &Path, relative: &Path) -> Result<(Dir, String), 
 
 pub struct StagedOutput {
     directory: Dir,
+    published: AtomicBool,
     final_name: String,
     pub path: PathBuf,
     _staging: tempfile::TempDir,
@@ -62,6 +66,7 @@ impl StagedOutput {
             .tempdir()?;
         Ok(Self {
             directory,
+            published: AtomicBool::new(false),
             final_name: name.to_owned(),
             path: staging.path().join(name),
             _staging: staging,
@@ -103,12 +108,31 @@ impl StagedOutput {
         if kind == "pdf" {
             pdf_integrity::validate(&mut source)?;
         }
+        if kind == "docx" {
+            docx_integrity::validate(&mut source)?;
+        }
         self.publish(source)
     }
 
     #[cfg(test)]
     pub fn commit(&self, allow_empty: bool) -> Result<i64, AppError> {
         self.publish(self.source(allow_empty)?)
+    }
+
+    /// Undo only a final entry actually published by this owner, e.g. when its
+    /// conversation was deleted while rendering. Never remove a collision.
+    pub fn discard_publication(&self) -> Result<(), AppError> {
+        if self.published.load(Ordering::Acquire) {
+            match self.directory.remove_file(&self.final_name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            #[cfg(unix)]
+            self.directory.open(".")?.sync_all()?;
+            self.published.store(false, Ordering::Release);
+        }
+        Ok(())
     }
 
     fn publish(&self, mut source: fs::File) -> Result<i64, AppError> {
@@ -144,6 +168,7 @@ impl StagedOutput {
             }
             self.directory
                 .rename(&temporary, &self.directory, &self.final_name)?;
+            self.published.store(true, Ordering::Release);
             #[cfg(unix)]
             self.directory.open(".")?.sync_all()?;
             Ok(())
@@ -203,6 +228,23 @@ mod tests {
                 panic!("directory replacement failed: {error}");
             }
         }
+    }
+
+    #[test]
+    fn discard_removes_only_its_published_entry_and_preserves_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let (directory, id) = reserve_directory(root.path(), Path::new("generated")).unwrap();
+        let output = StagedOutput::from_reserved(directory, "file.txt").unwrap();
+        let final_path = root.path().join("generated").join(id).join("file.txt");
+        fs::write(&final_path, b"other owner").unwrap();
+        output.discard_publication().unwrap();
+        assert_eq!(fs::read(&final_path).unwrap(), b"other owner");
+        fs::remove_file(&final_path).unwrap();
+        fs::write(&output.path, b"published text").unwrap();
+        output.commit(false).unwrap();
+        output.discard_publication().unwrap();
+        output.discard_publication().unwrap();
+        assert!(!final_path.exists());
     }
 
     #[test]
@@ -294,9 +336,10 @@ mod tests {
     fn every_rendered_kind_keeps_its_extension_and_publishes_matching_bytes() {
         let root = tempfile::tempdir().unwrap();
         let pdf = pdf_integrity::fixture_pdf();
+        let docx = docx_integrity::fixture_docx();
         for (kind, name, bytes) in [
             ("pdf", "doc.pdf", pdf.as_slice()),
-            ("docx", "doc.docx", &b"PK\x03\x04fixture"[..]),
+            ("docx", "doc.docx", docx.as_slice()),
             ("image", "image.png", &b"\x89PNG\r\n\x1a\nfixture"[..]),
             ("audio", "audio.wav", &b"RIFF0000WAVEfixture"[..]),
             ("video", "video.webm", &b"\x1a\x45\xdf\xa3fixture"[..]),
@@ -326,6 +369,24 @@ mod tests {
             .join("generated")
             .join(id)
             .join("corrupt.pdf")
+            .exists());
+        drop(output);
+        assert!(!private.exists());
+    }
+
+    #[test]
+    fn corrupt_docx_with_correct_magic_is_not_published_and_staging_is_cleaned() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, id) = reserve_directory(root.path(), Path::new("generated")).unwrap();
+        let output = StagedOutput::from_reserved(dir, "bad.docx").unwrap();
+        let private = output.path.clone();
+        fs::write(&private, b"PK\x03\x04fake").unwrap();
+        assert!(output.commit_for("docx").is_err());
+        assert!(!root
+            .path()
+            .join("generated")
+            .join(id)
+            .join("bad.docx")
             .exists());
         drop(output);
         assert!(!private.exists());

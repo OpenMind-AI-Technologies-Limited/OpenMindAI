@@ -753,6 +753,38 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn export_worker_runs_real_generators_and_publication() {
+        for kind in ["pdf", "docx"] {
+            let root = tempfile::tempdir().unwrap();
+            let permit = crate::document_jobs::reserve().await.unwrap();
+            let (directory, id) = crate::artifact_output::reserve_directory(
+                root.path(),
+                std::path::Path::new("generated"),
+            )
+            .unwrap();
+            let filename = format!("report.{kind}");
+            let output =
+                crate::artifact_output::StagedOutput::from_reserved(directory, &filename).unwrap();
+            let size = crate::document_jobs::run(permit, move || {
+                crate::document_jobs::render(|| {
+                    if kind == "pdf" {
+                        generate_pdf(SAMPLE_MARKDOWN, "Worker report", &output.path)?;
+                    } else {
+                        generate_docx(SAMPLE_MARKDOWN, "Worker report", &output.path)?;
+                    }
+                    output.commit_for(kind)
+                })
+            })
+            .await
+            .unwrap();
+            let bytes =
+                std::fs::read(root.path().join("generated").join(id).join(filename)).unwrap();
+            assert_eq!(size, bytes.len() as i64);
+            assert!(size > 0);
+        }
+    }
+
     #[test]
     fn generates_real_docx_document() {
         let temp = tempfile::tempdir().unwrap();
@@ -777,6 +809,26 @@ mod tests {
         assert!(xml.contains("Report Title"));
         assert!(xml.contains("fn main() {}"));
         assert!(xml.contains("Alpha"));
+    }
+
+    #[test]
+    fn unicode_table_docx_export_passes_package_publication_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let (directory, id) = crate::artifact_output::reserve_directory(
+            root.path(),
+            std::path::Path::new("generated"),
+        )
+        .unwrap();
+        let output =
+            crate::artifact_output::StagedOutput::from_reserved(directory, "report.docx").unwrap();
+        let body = format!("# English বাংলা Русский\n\n{SAMPLE_MARKDOWN}");
+        generate_docx(&body, "Unicode & table report", &output.path).unwrap();
+        let expected = std::fs::read(&output.path).unwrap();
+        assert_eq!(output.commit_for("docx").unwrap(), expected.len() as i64);
+        assert_eq!(
+            std::fs::read(root.path().join("generated").join(id).join("report.docx")).unwrap(),
+            expected
+        );
     }
 
     #[test]
