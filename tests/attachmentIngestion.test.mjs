@@ -8,7 +8,12 @@ beforeEach(async () => { await app.mount(); });
 afterEach(async () => { await app.unmount(); });
 after(async () => { await app.dispose(); });
 function files(prefix, count, kind = "text") {
-  return Array.from({ length: count }, (_, index) => ({ attachmentDraft: { ...attachment(`${prefix}-${index}`), kind } }));
+  return Array.from({ length: count }, (_, index) => {
+    const attachmentDraft = { ...attachment(`${prefix}-${index}`), kind };
+    // Browser File objects always have name/size/type; the old mock omitted
+    // the name and falsely failed the PDF import progress assertion.
+    return { name: attachmentDraft.name, size: attachmentDraft.size, type: attachmentDraft.type, attachmentDraft };
+  });
 }
 async function start(selection) {
   let pending; await act(async () => { pending = app.props.addFiles(selection); }); return { pending };
@@ -47,6 +52,45 @@ test("removal while decoding frees capacity used by the queued selection", async
   assert(!app.props.attachments.some(x=>x.id==="existing-0"));
   assert(app.props.attachments.some(x=>x.id==="incoming-1"));
 });
+test("Cancel import aborts in-flight PDF work and discards its decoded attachment", async () => {
+  const pending = deferred();
+  const incoming = files("cancel-pdf", 1, "pdf");
+  incoming[0].gate = pending;
+  const running = await start(incoming);
+  assert.equal(incoming[0].reads, 1);
+  assert.equal(incoming[0].readOptions.signal.aborted, false);
+  assert.equal(app.props.pdfImportProgress.fileName, incoming[0].attachmentDraft.name);
+  await act(async () => app.props.onCancelPdfImport());
+  assert.equal(incoming[0].readOptions.signal.aborted, true);
+  assert.equal(app.props.pdfImportProgress, null);
+  await release(pending, running);
+  assert.equal(app.props.attachments.length, 0, "cancelled PDF must never be committed");
+});
+
+test("opening another chat aborts pending PDF ingestion before it can populate the new chat", async () => {
+  const pending = deferred();
+  const incoming = files("previous-chat-pdf", 1, "pdf");
+  incoming[0].gate = pending;
+  const running = await start(incoming);
+  assert.equal(incoming[0].readOptions.signal.aborted, false);
+  await app.open("B");
+  assert.equal(incoming[0].readOptions.signal.aborted, true);
+  await release(pending, running);
+  assert.equal(app.props.attachments.length, 0);
+});
+
+test("leaving chat for Tools cancels expensive PDF OCR instead of leaving background CPU work", async () => {
+  const gate = deferred();
+  const incoming = files("tools-switch-pdf", 1, "pdf");
+  incoming[0].gate = gate;
+  const request = await start(incoming);
+  assert.equal(incoming[0].readOptions.signal.aborted, false);
+  await app.openTools();
+  assert.equal(incoming[0].readOptions.signal.aborted, true);
+  await release(gate, request);
+  assert.equal(incoming[0].reads, 1);
+});
+
 test("navigation and explicit New chat discard both in-flight and queued old selections", async () => {
   const gate=deferred(),first=files("old",1),second=files("queued",1);first[0].gate=gate;
   const one=await start(first),two=await start(second);

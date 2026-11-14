@@ -4,6 +4,7 @@ import type {
   ImageGenerationOptions,
   ArtifactKind,
   Conversation,
+  ChatSearchPage,
   ForkedConversation,
   AppPreferences,
   DownloadStatus,
@@ -24,7 +25,7 @@ import type {
   CacheClearResult,
   ModelCatalogReport,
   LaunchPlan,
-  LibraryEntry,
+  LibraryPage,
   LlamaRuntimeStatus,
   Message,
   ModelRecord,
@@ -34,6 +35,8 @@ import type {
   PortableRootInfo,
   Project,
   ProjectFile,
+  ProjectBinaryFileDownload,
+  ProjectListPage,
   RuntimeInventory,
   StorageSummary,
   UserProfile,
@@ -191,6 +194,8 @@ export const api = {
   checkStorageLocation: (path: string) =>
     call<StorageLocationCheck>("check_storage_location", { path }),
   conversations: () => call<Conversation[]>("list_conversations"),
+  searchConversations: (query: string, cursor?: string, limit = 40) =>
+    call<ChatSearchPage>("search_conversations", { query, cursor, limit }),
   createConversation: (title?: string) => call<Conversation>("create_conversation", { title }),
   forkConversationForEdit: (conversationId: string, messageId: string) =>
     call<ForkedConversation>("fork_conversation_for_edit", { conversationId, messageId }),
@@ -221,7 +226,9 @@ export const api = {
   completeMessage: (messageId: string, status: Message["status"]) =>
     call<void>("complete_message", { messageId, status }),
   deleteMessage: (messageId: string) => queueMessageDelete(messageId),
-  projects: () => call<Project[]>("list_projects"),
+  projects: (cursor?: string, limit = 50) =>
+    call<ProjectListPage>("list_projects", { cursor, limit }),
+  getProject: (projectId: string) => call<Project>("get_project", { projectId }),
   createProject: (name: string) => call<Project>("create_project", { name }),
   updateProject: (projectId: string, name: string, instructions: string) =>
     call<Project>("update_project", { projectId, name, instructions }),
@@ -250,6 +257,17 @@ export const api = {
         error,
       },
     }),
+  addProjectBinaryFile: (
+    projectId: string,
+    name: string,
+    sizeBytes: number,
+    mimeType: string | null,
+    dataBase64: string,
+  ) => call<ProjectFile>("add_project_binary_file", {
+    input: { projectId, name, sizeBytes, mimeType, dataBase64 },
+  }),
+  readProjectBinaryFile: (projectId: string, fileId: string) =>
+    call<ProjectBinaryFileDownload>("read_project_binary_file", { projectId, fileId }),
   deleteProjectFile: (projectId: string, fileId: string) =>
     call<void>("delete_project_file", { projectId, fileId }),
   hardware: () => call<HardwareProfile>("detect_hardware"),
@@ -370,7 +388,8 @@ export const api = {
     imageOptions: kind === "image" ? imageOptions : undefined,
   }),
   listArtifacts: (conversationId: string) => call<Artifact[]>("list_artifacts", { conversationId }),
-  listLibraryEntries: () => call<LibraryEntry[]>("list_library_entries"),
+  listLibraryEntries: (options: { kind?: ArtifactKind; search?: string; cursor?: string; limit?: number } = {}) =>
+    call<LibraryPage>("list_library_entries", options),
   openArtifact: (artifactId: string) => call<void>("open_artifact", { artifactId }),
   openExternalUrl: (url: string) => call<void>("open_external_url", { url }),
   revealArtifactInFolder: (artifactId: string) =>
@@ -378,6 +397,8 @@ export const api = {
 };
 
 function browserFallback<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (command === "search_conversations")
+    return Promise.resolve({ conversations: [], nextCursor: null } as T);
   const now = new Date().toISOString();
   if (command === "get_portable_root") {
     return Promise.resolve({
@@ -458,7 +479,12 @@ function browserFallback<T>(command: string, args?: Record<string, unknown>): Pr
     } as T);
   }
   if (command === "delete_message") return Promise.resolve(undefined as T);
-  if (command === "list_projects") return Promise.resolve([] as T);
+  if (command === "list_projects")
+    return Promise.resolve({ projects: [], nextCursor: null } as T);
+  if (command === "get_project")
+    return Promise.reject(new Error("Project details require the desktop app."));
+  if (command === "add_project_binary_file" || command === "read_project_binary_file")
+    return Promise.reject(new Error("Binary project attachments require the desktop app."));
   if (command === "create_project" || command === "update_project") {
     return Promise.resolve({
       id: (args?.projectId as string) || crypto.randomUUID(),
@@ -520,8 +546,9 @@ function browserFallback<T>(command: string, args?: Record<string, unknown>): Pr
       updatedAt: now,
     } as T);
   }
-  if (command === "list_artifacts" || command === "list_library_entries")
-    return Promise.resolve([] as T);
+  if (command === "list_artifacts") return Promise.resolve([] as T);
+  if (command === "list_library_entries")
+    return Promise.resolve({ entries: [], nextCursor: null, totalCount: 0 } as T);
   if (command === "open_artifact" || command === "reveal_artifact_in_folder") {
     return Promise.resolve(undefined as T);
   }

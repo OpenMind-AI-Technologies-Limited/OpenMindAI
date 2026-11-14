@@ -121,7 +121,7 @@ pub fn run_diagnostics(
         ("mediaSpeak", "OpenMindAI Speak", "audio"),
     ] {
         let report =
-            media_preflight::preflight_for_hardware(root, kind, hardware)?.ok_or_else(|| {
+            media_preflight::preflight_for_hardware_fast(root, kind, hardware)?.ok_or_else(|| {
                 AppError::internal(format!("no media preflight configured for {kind}"))
             })?;
         let detail = report.issue_summary();
@@ -210,9 +210,8 @@ pub fn backup_database(
     root: &PortableRootManager,
     database: &Database,
 ) -> Result<BackupInfo, AppError> {
-    let backups_dir = root.resolve_relative("backups")?;
     let (filename, size_bytes) =
-        crate::database_backup::create_snapshot(database.connection(), &backups_dir)?;
+        crate::database_backup::create_snapshot(database.connection(), root.root())?;
     Ok(BackupInfo {
         name: filename,
         size_bytes,
@@ -228,6 +227,9 @@ pub fn list_backups(root: &PortableRootManager) -> Result<Vec<BackupInfo>, AppEr
     let mut backups = Vec::new();
     for entry in fs::read_dir(&backups_dir)? {
         let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(".pending-") {
+            continue;
+        }
         let metadata = entry.metadata()?;
         if !metadata.is_file() {
             continue;

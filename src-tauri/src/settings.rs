@@ -28,12 +28,18 @@ pub struct AppPreferences {
     pub code_copy_buttons: bool,
     pub markdown_rendering: bool,
     pub default_performance_profile: String,
+    /// Compatibility only. This release has no usage-telemetry pipeline and
+    /// must never treat a historical stored true value as user consent.
     pub telemetry_enabled: bool,
     /// Compatibility field: this release always persists local chat history.
     pub save_chat_history: bool,
     /// Remains set until an affected user explicitly acknowledges the correction.
     pub chat_history_notice_required: bool,
     pub local_runtime_autostart: bool,
+    /// Initial setup choice: "cloud", "local", or "auto" (Both).
+    pub ai_execution_mode: String,
+    /// Separate coding-agent preference; starts with the same onboarding choice.
+    pub coding_agent_execution_mode: String,
     pub confirm_before_delete: bool,
     pub web_search_enabled: bool,
     pub deep_research_enabled: bool,
@@ -68,6 +74,7 @@ pub struct AppPreferences {
     /// "direct" (default: ignore the PC proxy), "manual" or "system"; see net.rs.
     pub network_proxy_mode: String,
     pub network_proxy_url: String,
+    pub network_proxy_credential_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -142,6 +149,10 @@ impl Default for AppPreferences {
             save_chat_history: true,
             chat_history_notice_required: false,
             local_runtime_autostart: true,
+            ai_execution_mode: "auto".to_string(),
+            // Existing installs used only local OpenAgent; require an explicit
+            // Cloud/Both choice before sending project context remotely.
+            coding_agent_execution_mode: "local".to_string(),
             confirm_before_delete: true,
             web_search_enabled: true,
             deep_research_enabled: true,
@@ -172,6 +183,7 @@ impl Default for AppPreferences {
             coding_autonomy: "bounded".to_string(),
             network_proxy_mode: "direct".to_string(),
             network_proxy_url: String::new(),
+            network_proxy_credential_id: None,
         }
     }
 }
@@ -206,6 +218,23 @@ impl<'a> SettingsRepository<'a> {
     pub fn get_preferences(&self) -> Result<AppPreferences, AppError> {
         match self.load_saved_preferences()? {
             Some(mut preferences) => {
+                let serialized = serde_json::to_value(&preferences)
+                    .map_err(|_| AppError::internal("Invalid preferences"))?;
+                let mut sanitized = serialized.clone();
+                crate::proxy_credentials::protect(
+                    &mut sanitized,
+                    Some(&serialized),
+                    crate::github::secret_store::set_secret,
+                )?;
+                if sanitized != serialized {
+                    crate::proxy_credentials::migrate(
+                        self.database.connection(),
+                        &serialized,
+                        &sanitized,
+                    )?;
+                    preferences = serde_json::from_value(sanitized)
+                        .map_err(|_| AppError::internal("Invalid preferences"))?;
+                }
                 if !preferences.save_chat_history {
                     // The old flag never stopped persistence. Correct the reported
                     // state and keep a durable, visible notice; do not delete chats.
@@ -220,6 +249,19 @@ impl<'a> SettingsRepository<'a> {
                          WHERE key = ?2",
                         params![Utc::now().to_rfc3339(), SETTINGS_KEY],
                     )?;
+                }
+                if preferences.telemetry_enabled {
+                    // The Privacy toggle historically saved an inert boolean.
+                    // Reset it so no later release can misinterpret it as valid
+                    // informed consent to data collection or transmission.
+                    self.database.connection().execute(
+                        "UPDATE app_settings
+                         SET value_json = json_set(value_json, '$.telemetryEnabled', json('false')),
+                             updated_at = ?1
+                         WHERE key = ?2",
+                        params![Utc::now().to_rfc3339(), SETTINGS_KEY],
+                    )?;
+                    preferences.telemetry_enabled = false;
                 }
                 if preferences.auto_download_model_updates {
                     // No scheduler implements this legacy preference. Update only
@@ -257,15 +299,40 @@ impl<'a> SettingsRepository<'a> {
                 "This version saves chat history locally. Temporary chats are not supported; history saving cannot be disabled.",
             ));
         }
+        if !["auto", "local", "cloud"].contains(&preferences.ai_execution_mode.as_str())
+            || !["auto", "local", "cloud"]
+                .contains(&preferences.coding_agent_execution_mode.as_str())
+        {
+            return Err(AppError::internal("Invalid Cloud/Local execution mode"));
+        }
         let mut saved = preferences.clone();
+        // Telemetry consent cannot be solicited by this build: no collector
+        // or privacy flow implements this legacy flag. Do not persist true,
+        // including when an old UI/client sends it during an unrelated save.
+        saved.telemetry_enabled = false;
         if let Some(existing) = self.load_saved_preferences()? {
             // Ordinary preference saves (including older clients) cannot silently
             // dismiss the notice. Acknowledgment has a separate, narrow operation.
             saved.chat_history_notice_required |=
                 existing.chat_history_notice_required || !existing.save_chat_history;
         }
-        self.save_json(SETTINGS_KEY, &saved)?;
-        Ok(saved)
+        let previous = self
+            .load_saved_preferences()?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| AppError::internal("Invalid preferences"))?;
+        let mut sanitized =
+            serde_json::to_value(&saved).map_err(|_| AppError::internal("Invalid preferences"))?;
+        crate::proxy_credentials::protect(
+            &mut sanitized,
+            previous.as_ref(),
+            crate::github::secret_store::set_secret,
+        )?;
+        self.database
+            .connection()
+            .execute_batch("PRAGMA secure_delete = ON;")?;
+        self.save_json(SETTINGS_KEY, &sanitized)?;
+        serde_json::from_value(sanitized).map_err(|_| AppError::internal("Invalid preferences"))
     }
 
     pub fn acknowledge_chat_history_notice(&self) -> Result<AppPreferences, AppError> {
@@ -347,6 +414,62 @@ mod tests {
         let loaded = repo.get_preferences().unwrap();
         assert_eq!(loaded.theme, ThemeMode::Light);
         assert!(!loaded.enter_to_send);
+    }
+
+    #[test]
+    fn obsolete_telemetry_toggle_never_grants_or_persists_consent() {
+        let database = Database::in_memory().unwrap();
+        let repo = SettingsRepository::new(&database);
+        let mut requested = repo.get_preferences().unwrap();
+        requested.language = "Russian".to_string();
+        requested.telemetry_enabled = true;
+
+        // Older UI clients can still submit the compatibility field, but it
+        // must not enable a feature without an actual consent-gated collector.
+        let saved = repo.save_preferences(&requested).unwrap();
+        assert!(!saved.telemetry_enabled);
+        assert_eq!(saved.language, "Russian");
+        let stored: String = database
+            .connection()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap()["telemetryEnabled"],
+            false
+        );
+
+        // A profile saved by an older version may contain a phantom true.
+        // Loading corrects that value durably while preserving other choices.
+        database
+            .connection()
+            .execute(
+                "UPDATE app_settings
+                 SET value_json = json_set(value_json, '$.telemetryEnabled', json('true'))
+                 WHERE key = ?1",
+                params![SETTINGS_KEY],
+            )
+            .unwrap();
+        let normalized = repo.get_preferences().unwrap();
+        assert!(!normalized.telemetry_enabled);
+        assert_eq!(normalized.language, "Russian");
+        let reloaded = repo.get_preferences().unwrap();
+        assert!(!reloaded.telemetry_enabled);
+        let persisted: String = database
+            .connection()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted).unwrap()["telemetryEnabled"],
+            false
+        );
     }
 
     #[test]

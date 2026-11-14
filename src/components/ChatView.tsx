@@ -27,6 +27,8 @@ import type {
   WebResearchProgressEvent,
 } from "../types";
 import type { AttachmentDraft } from "../lib/chat";
+import type { PdfExtractionProgress } from "../lib/pdf";
+import type { CloudModel } from "../cloudApi";
 import { MessageItem } from "./MessageItem";
 import { ResearchProgress } from "./ResearchProgress";
 import { Composer } from "./Composer";
@@ -58,6 +60,8 @@ export function ChatView(props: {
   imageOptions: ImageGenerationOptions;
   setImageOptions: (options: ImageGenerationOptions) => void;
   attachments: AttachmentDraft[];
+  pdfImportProgress?: (PdfExtractionProgress & { fileName: string }) | null;
+  onCancelPdfImport?: () => void;
   preferences: AppPreferences | null;
   activity: RealtimeActivity;
   webProgress: WebResearchProgressEvent | null;
@@ -79,6 +83,12 @@ export function ChatView(props: {
   modelSwitching: boolean;
   modelSwitchError: string | null;
   onSelectModel: (modelId: string) => void;
+  showCloudModels?: boolean;
+  cloudUnavailable?: boolean;
+  onConnectCloud?: () => void;
+  cloudModels?: CloudModel[];
+  activeCloudModelId?: string;
+  onSelectCloudModel?: (modelId: string) => void;
   artifactsByMessage: Map<string, Artifact[]>;
   onCreateArtifact: (messageId: string, kind: ArtifactKind, content: string, filenameHint?: string) => void;
   onOpenArtifact: (artifact: Artifact) => void;
@@ -123,6 +133,8 @@ export function ChatView(props: {
       imageOptions={props.imageOptions}
       setImageOptions={props.setImageOptions}
       attachments={props.attachments}
+      pdfImportProgress={props.pdfImportProgress}
+      onCancelPdfImport={props.onCancelPdfImport}
       enterToSend={props.enterToSend}
       streaming={props.streaming}
       submitting={props.submitting}
@@ -138,8 +150,18 @@ export function ChatView(props: {
       modelSwitching={props.modelSwitching}
       modelSwitchError={props.modelSwitchError}
       onSelectModel={props.onSelectModel}
+      showCloudModels={props.showCloudModels}
+      cloudUnavailable={props.cloudUnavailable}
+      onConnectCloud={props.onConnectCloud}
+      cloudModels={props.cloudModels}
+      activeCloudModelId={props.activeCloudModelId}
+      onSelectCloudModel={props.onSelectCloudModel}
       placeholder={isEmpty ? "Ask anything..." : "Message OpenMindAI..."}
-      note={isEmpty ? undefined : "Responses are generated locally on your machine."}
+      note={isEmpty ? undefined : props.cloudUnavailable
+        ? "Cloud Only is waiting for a verified account and an available API model. No local inference will start."
+        : props.showCloudModels
+        ? "Cloud API model selected. Your request can route to Local if Cloud becomes unavailable."
+        : "Responses use installed local models when Cloud is unavailable or Local is selected."}
     />
   );
 

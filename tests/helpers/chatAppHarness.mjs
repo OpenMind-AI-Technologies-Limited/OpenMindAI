@@ -67,6 +67,7 @@ export async function createChatAppHarness() {
             external: true,
           }));
           builder.onResolve({ filter: /^\.\/api$/ }, () => ({ path: "api", namespace: "fixture" }));
+          builder.onResolve({ filter: /^\.\/cloudApi$/ }, () => ({ path: "cloud", namespace: "fixture" }));
           builder.onResolve({ filter: /^\.\/components\// }, (args) => ({
             path: args.path.split("/").at(-1),
             namespace: "fixture",
@@ -94,6 +95,7 @@ export async function createChatAppHarness() {
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, ({ path }) => {
             const modules = {
               api: "export const api=globalThis.__chatDraftHarness.api;",
+              cloud: "export const cloud={status:async()=>({connected:false,user:null,message:null}),models:async()=>[]};export const hostedChat=async()=>{throw Error('Unexpected Cloud call during local draft regression');};export const submitQueuedScene=async()=>{throw Error('Unexpected queued Studio call during local chat regression');};",
               events:
                 "export const listen=async(name,callback)=>{const events=globalThis.__chatDraftHarness.events;events.set(name,callback);return()=>events.delete(name);};",
               socket:
@@ -104,7 +106,7 @@ export async function createChatAppHarness() {
               chat: `export const attachmentMedia=items=>items.flatMap(item=>item.mediaItems),buildMessageContent=content=>content,
               inferChatMode=()=>globalThis.__chatDraftHarness.mode,isUntitledConversation=()=>false,attachmentContextStats=()=>({truncatedCount:0,omittedCount:0}),
               attachmentKind=file=>file.attachmentDraft?.kind??file.kind??"text",
-              readAttachment=async file=>{file.reads=(file.reads??0)+1;if(file.gate)await file.gate.promise;if(file.failure)throw file.failure;return file.attachmentDraft;},settledValue=result=>result.status==='fulfilled'?result.value:null,
+              readAttachment=async (file,options)=>{file.reads=(file.reads??0)+1;file.readOptions=options;if(file.gate)await file.gate.promise;if(file.failure)throw file.failure;return file.attachmentDraft;},settledValue=result=>result.status==='fulfilled'?result.value:null,
               titleFromPrompt=content=>content;`,
             };
             if (modules[path]) return { contents: modules[path], loader: "js" };
@@ -239,6 +241,9 @@ export async function createChatAppHarness() {
     },
     async open(id) {
       await act(async () => context.sidebar.onOpenConversation(id));
+    },
+    async openTools() {
+      await act(async () => context.sidebar.onOpenTools());
     },
     async newChat() {
       await act(async () => context.sidebar.onNewChat());

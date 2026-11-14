@@ -45,6 +45,11 @@ export interface Conversation {
   activeModelId: string | null;
 }
 
+export interface ChatSearchPage {
+  conversations: Conversation[];
+  nextCursor: string | null;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -384,6 +389,12 @@ export interface LibraryEntry {
   updatedAt: string;
 }
 
+export interface LibraryPage {
+  entries: LibraryEntry[];
+  nextCursor: string | null;
+  totalCount: number;
+}
+
 export interface ProjectFile {
   id: string;
   projectId: string;
@@ -391,9 +402,31 @@ export interface ProjectFile {
   sizeBytes: number;
   mimeType: string | null;
   contentText: string | null;
-  status: "ready" | "tracked" | "skipped" | "failed";
+  status: "ready" | "attached" | "tracked" | "skipped" | "failed";
   error: string | null;
   addedAt: string;
+  sha256: string | null;
+}
+
+export interface ProjectBinaryFileDownload {
+  name: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  sha256: string;
+  dataBase64: string;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  updatedAt: string;
+  conversationCount: number;
+  fileCount: number;
+}
+
+export interface ProjectListPage {
+  projects: ProjectSummary[];
+  nextCursor: string | null;
 }
 
 export interface Project {
@@ -468,6 +501,8 @@ export interface AppPreferences {
   readonly saveChatHistory: boolean;
   chatHistoryNoticeRequired: boolean;
   localRuntimeAutostart: boolean;
+  aiExecutionMode: "auto" | "local" | "cloud";
+  codingAgentExecutionMode: "auto" | "local" | "cloud";
   confirmBeforeDelete: boolean;
   webSearchEnabled: boolean;
   deepResearchEnabled: boolean;
@@ -500,6 +535,7 @@ export interface AppPreferences {
   /** How downloads and online services reach the internet. */
   networkProxyMode: "direct" | "manual" | "system";
   networkProxyUrl: string;
+  networkProxyCredentialId?: string | null;
 }
 
 /** Live state of the Agent Setup coding agent (desktop OpenAgent and VS Code). */

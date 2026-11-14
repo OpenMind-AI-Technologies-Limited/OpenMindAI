@@ -21,9 +21,11 @@ import type { ReactNode, RefObject } from "react";
 import type { ImageGenerationOptions, ModelRecord, RuntimeInventory } from "../types";
 import { formatBytes } from "../lib/format";
 import { attachmentContextStats, inferChatMode, type AttachmentDraft } from "../lib/chat";
+import type { PdfExtractionProgress } from "../lib/pdf";
 import { transcribeAudioBlob } from "../lib/media";
 import { api } from "../api";
 import { ModelSelector } from "./ModelSelector";
+import type { CloudModel } from "../cloudApi";
 
 export function Composer(props: {
   prompt: string;
@@ -32,6 +34,8 @@ export function Composer(props: {
   imageOptions: ImageGenerationOptions;
   setImageOptions: (options: ImageGenerationOptions) => void;
   attachments: AttachmentDraft[];
+  pdfImportProgress?: (PdfExtractionProgress & { fileName: string }) | null;
+  onCancelPdfImport?: () => void;
   enterToSend: boolean;
   streaming: boolean;
   submitting: boolean;
@@ -47,6 +51,12 @@ export function Composer(props: {
   modelSwitching: boolean;
   modelSwitchError: string | null;
   onSelectModel: (modelId: string) => void;
+  showCloudModels?: boolean;
+  cloudUnavailable?: boolean;
+  onConnectCloud?: () => void;
+  cloudModels?: CloudModel[];
+  activeCloudModelId?: string;
+  onSelectCloudModel?: (modelId: string) => void;
   placeholder?: string;
   note?: string;
 }) {
@@ -227,6 +237,28 @@ export function Composer(props: {
       }}
     >
       <div className="composer-box">
+        {props.pdfImportProgress ? (
+          <div className="pdf-import-progress" role="status" aria-live="polite">
+            <span>
+              Importing {props.pdfImportProgress.fileName}:{" "}
+              {props.pdfImportProgress.phase === "reading" ? "reading text" : "scanned-page OCR"}{" "}
+              {props.pdfImportProgress.completed}/{props.pdfImportProgress.total} pages
+            </span>
+            <progress
+              aria-label="PDF import progress"
+              max={Math.max(1, props.pdfImportProgress.total)}
+              value={props.pdfImportProgress.completed}
+            />
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={props.onCancelPdfImport}
+              disabled={!props.onCancelPdfImport}
+            >
+              Cancel import
+            </button>
+          </div>
+        ) : null}
         {props.attachments.length ? (
           <div className="attachment-tray">
             {props.attachments.map((attachment) => {
@@ -421,15 +453,36 @@ export function Composer(props: {
             rows={1}
           />
           <div className="composer-trailing">
-            <ModelSelector
-              models={props.models}
-              activeModelId={props.activeModelId}
-              runtime={props.runtime}
-              switching={props.modelSwitching}
-              disabled={props.backgroundBusy || props.streaming || props.submitting}
-              switchError={props.modelSwitchError}
-              onSelect={props.onSelectModel}
-            />
+            {props.cloudUnavailable ? (
+              <button type="button" className="ghost-button cloud-connect-button"
+                title="Cloud-only mode needs a signed-in account with available API models"
+                onClick={props.onConnectCloud}>Connect Cloud</button>
+            ) : props.showCloudModels ? (
+              <label className="cloud-composer-model" title="Authenticated OpenMindAI Cloud API model">
+                <span className="sr-only">Cloud API model</span>
+                <select
+                  className="cloud-model-select"
+                  aria-label="Cloud API model"
+                  value={props.activeCloudModelId ?? ""}
+                  disabled={props.backgroundBusy || props.streaming || props.submitting}
+                  onChange={(event) => props.onSelectCloudModel?.(event.currentTarget.value)}
+                >
+                  {(props.cloudModels ?? []).map((model) => (
+                    <option key={model.id} value={model.id}>{model.name || model.id}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <ModelSelector
+                models={props.models}
+                activeModelId={props.activeModelId}
+                runtime={props.runtime}
+                switching={props.modelSwitching}
+                disabled={props.backgroundBusy || props.streaming || props.submitting}
+                switchError={props.modelSwitchError}
+                onSelect={props.onSelectModel}
+              />
+            )}
             <button
               type="button"
               className={recording ? "icon-button mic-active" : "icon-button"}

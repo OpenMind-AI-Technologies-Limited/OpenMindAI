@@ -23,6 +23,7 @@ mod runtime;
 mod runtime_install;
 mod sampling;
 mod settings;
+mod proxy_credentials;
 mod storage;
 mod voice_runtime;
 mod web_provider_config;
@@ -35,8 +36,8 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use artifacts::{Artifact, ArtifactManager, ArtifactRepository, LibraryEntry};
-use chat::{ChatRepository, Conversation, Message};
+use artifacts::{Artifact, ArtifactManager, ArtifactRepository, LibraryPage};
+use chat::{ChatRepository, ChatSearchPage, Conversation, Message};
 use database::Database;
 use github::{GithubAccount, GithubIssueSummary, GithubRepoSummary, GithubRepository};
 use google::{GoogleCredentialsStatus, GoogleRepository};
@@ -58,7 +59,8 @@ use portable_root::{
     SetupState, RECOMMENDED_INITIAL_STORAGE_BYTES,
 };
 use projects::{
-    project_context_message, Project, ProjectFile, ProjectFileInput, ProjectRepository,
+    project_context_message, project_context_message_for_prompt, Project, ProjectBinaryFileDownload,
+    ProjectBinaryFileInput, ProjectFile, ProjectFileInput, ProjectRepository,
 };
 use reqwest::Client;
 use runtime::{allocate_local_port, LlamaRuntimeManager, LlamaRuntimeStatus, RuntimeInventory};
@@ -339,6 +341,24 @@ fn list_messages(
 }
 
 #[tauri::command]
+fn search_conversations(
+    query: String,
+    cursor: Option<String>,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<ChatSearchPage, app_error::AppError> {
+    let db = state
+        .database
+        .lock()
+        .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
+    ChatRepository::new(&db).search_conversations(
+        &query,
+        cursor.as_deref(),
+        limit.unwrap_or(40),
+    )
+}
+
+#[tauri::command]
 fn add_user_message(
     conversation_id: String,
     content: String,
@@ -399,12 +419,30 @@ fn delete_message(message_id: String, state: State<AppState>) -> Result<(), app_
 }
 
 #[tauri::command]
-fn list_projects(state: State<AppState>) -> Result<Vec<Project>, app_error::AppError> {
+fn list_projects(
+    cursor: Option<String>,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<projects::ProjectListPage, app_error::AppError> {
     let db = state
         .database
         .lock()
         .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
-    ProjectRepository::new(&db).list_projects()
+    ProjectRepository::new(&db).list_projects(cursor.as_deref(), limit.unwrap_or(50))
+}
+
+/// Only the selected project's conversations and full text previews cross
+/// the Tauri IPC boundary. The catalog query never includes file bodies.
+#[tauri::command]
+fn get_project(
+    project_id: String,
+    state: State<AppState>,
+) -> Result<Project, app_error::AppError> {
+    let db = state
+        .database
+        .lock()
+        .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
+    ProjectRepository::new(&db).find_project(&project_id)
 }
 
 #[tauri::command]
@@ -491,6 +529,33 @@ fn add_project_file(
     let project = repo.find_project(&input.project_id)?;
     sync_project_context_for_project(&db, &project)?;
     Ok(file)
+}
+
+/// Binary uploads are stored in the portable database; original file names
+/// never become operating-system paths.
+#[tauri::command]
+fn add_project_binary_file(
+    input: ProjectBinaryFileInput,
+    state: State<AppState>,
+) -> Result<ProjectFile, app_error::AppError> {
+    let db = state
+        .database
+        .lock()
+        .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
+    ProjectRepository::new(&db).add_binary_file(&input)
+}
+
+#[tauri::command]
+fn read_project_binary_file(
+    project_id: String,
+    file_id: String,
+    state: State<AppState>,
+) -> Result<ProjectBinaryFileDownload, app_error::AppError> {
+    let db = state
+        .database
+        .lock()
+        .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
+    ProjectRepository::new(&db).read_binary_file(&project_id, &file_id)
 }
 
 #[tauri::command]
@@ -684,9 +749,22 @@ async fn create_generation_artifact(
     // `state.hardware` is the startup placeholder (0 bytes RAM, no GPUs); the
     // memory and GPU checks need the completed hardware scan.
     let hardware = HardwareProfiler::for_inference(&state.hardware);
-    if let Some(report) =
-        artifacts::media_preflight::preflight_for_hardware(&state.root, artifact_kind, &hardware)?
-    {
+    let verification_root = state.root.clone();
+    let verification_kind = artifact_kind.to_owned();
+    // Rehashing a multi-gigabyte checkpoint is blocking filesystem I/O.
+    // Do not occupy a Tokio async worker or freeze unrelated chat commands.
+    let media_report = tokio::task::spawn_blocking(move || {
+        artifacts::media_preflight::preflight_for_hardware(
+            &verification_root,
+            &verification_kind,
+            &hardware,
+        )
+    })
+    .await
+    .map_err(|error| {
+        app_error::AppError::internal(format!("media integrity task failed: {error}"))
+    })??;
+    if let Some(report) = media_report {
         report.ensure_ready()?;
     }
     let (artifact, path) = {
@@ -1016,13 +1094,24 @@ fn list_artifacts(
 }
 
 #[tauri::command]
-fn list_library_entries(state: State<AppState>) -> Result<Vec<LibraryEntry>, app_error::AppError> {
+fn list_library_entries(
+    kind: Option<String>,
+    search: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<LibraryPage, app_error::AppError> {
     let db = state
         .database
         .lock()
         .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
     db.recover_stale_image_artifacts()?;
-    ArtifactRepository::new(&db).list_all(200)
+    ArtifactRepository::new(&db).list_page(
+        kind.as_deref(),
+        search.as_deref(),
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
 }
 
 #[tauri::command]
@@ -1829,7 +1918,7 @@ async fn send_chat_message(
     let routing = resolve_conversation_model(&state, &conversation_id, &mode, trimmed)?;
     let model = routing.model;
     state.warm_start.note_foreground_request(&model.id);
-    sync_project_context(&state, &conversation_id)?;
+    sync_project_context_for_prompt(&state, &conversation_id, trimmed)?;
     let dataset_context = dataset_context::build_dataset_context(
         &state.root,
         trimmed,
@@ -1936,7 +2025,7 @@ async fn regenerate_message(
     let routing = resolve_conversation_model(&state, &conversation_id, &mode, &user.content)?;
     let model = routing.model;
     state.warm_start.note_foreground_request(&model.id);
-    sync_project_context(&state, &conversation_id)?;
+    sync_project_context_for_prompt(&state, &conversation_id, &user.content)?;
     let dataset_context = dataset_context::build_dataset_context(
         &state.root,
         &user.content,
@@ -2078,11 +2167,19 @@ fn sync_project_context_in_database(
     db: &Database,
     conversation_id: &str,
 ) -> Result<(), app_error::AppError> {
+    sync_project_context_in_database_for_prompt(db, conversation_id, None)
+}
+
+fn sync_project_context_in_database_for_prompt(
+    db: &Database,
+    conversation_id: &str,
+    prompt: Option<&str>,
+) -> Result<(), app_error::AppError> {
     let project = ProjectRepository::new(db).project_for_conversation(conversation_id)?;
     let content = match project.as_ref() {
         Some(project) => {
             let mut parts = Vec::new();
-            if let Some(base) = project_context_message(project) {
+            if let Some(base) = project_context_message_for_prompt(project, prompt) {
                 parts.push(base);
             }
             if let Some(workspace) = local_workspace::workspace_context_for_project(db, &project.id)? {
@@ -2114,15 +2211,16 @@ fn sync_project_context_for_project(
     Ok(())
 }
 
-fn sync_project_context(
+pub(crate) fn sync_project_context_for_prompt(
     state: &State<'_, AppState>,
     conversation_id: &str,
+    prompt: &str,
 ) -> Result<(), app_error::AppError> {
     let db = state
         .database
         .lock()
         .map_err(|_| app_error::AppError::internal("database lock poisoned"))?;
-    sync_project_context_in_database(&db, conversation_id)
+    sync_project_context_in_database_for_prompt(&db, conversation_id, Some(prompt))
 }
 
 #[tauri::command]
@@ -2181,7 +2279,10 @@ fn save_app_preferences(
         return Err(app_error::AppError::internal("invalid performance profile"));
     }
     let saved = SettingsRepository::new(&db).save_preferences(&preferences)?;
-    net::apply_proxy_settings(&saved.network_proxy_mode, &saved.network_proxy_url);
+    let proxy_url = if saved.network_proxy_mode == "manual" {
+        proxy_credentials::restore(&saved.network_proxy_url, saved.network_proxy_credential_id.as_deref(), github::secret_store::get_secret)?
+    } else { saved.network_proxy_url.clone() };
+    net::apply_proxy_settings(&saved.network_proxy_mode, &proxy_url);
     Ok(saved)
 }
 
@@ -2431,11 +2532,18 @@ pub fn run() {
         .unwrap_or_else(|| root.database_path());
     let database =
         Database::open(database_path.clone()).expect("failed to initialize SQLite database");
-    match SettingsRepository::new(&database).get_preferences() {
-        Ok(preferences) => net::apply_proxy_settings(
-            &preferences.network_proxy_mode,
-            &preferences.network_proxy_url,
-        ),
+    match SettingsRepository::new(&database).get_preferences().and_then(|preferences| {
+        let url = if preferences.network_proxy_mode == "manual" {
+            proxy_credentials::restore(&preferences.network_proxy_url, preferences.network_proxy_credential_id.as_deref(), github::secret_store::get_secret)?
+        } else { preferences.network_proxy_url.clone() };
+        Ok((preferences, url))
+    }) {
+        Ok((preferences, url)) => net::apply_proxy_settings(&preferences.network_proxy_mode, &url),
+        Err(app_error::AppError::SecretStoreFailed(_)) => {
+            // No direct-network fallback when a configured credential cannot be recovered.
+            tracing::warn!("proxy credential store unavailable; remote networking blocked until settings are repaired");
+            net::apply_proxy_settings("manual", "http://127.0.0.1:0");
+        }
         Err(error) => {
             tracing::warn!(%error, "could not load network preferences; connecting directly");
             net::apply_proxy_settings("direct", "");
@@ -2505,18 +2613,22 @@ pub fn run() {
             archive_conversation,
             delete_conversation,
             list_messages,
+            search_conversations,
             add_user_message,
             create_streaming_assistant_message,
             append_message_chunk,
             complete_message,
             delete_message,
             list_projects,
+            get_project,
             create_project,
             update_project,
             delete_project,
             link_project_conversation,
             unlink_project_conversation,
             add_project_file,
+            add_project_binary_file,
+            read_project_binary_file,
             delete_project_file,
             create_text_artifact,
             create_document_artifact,
@@ -2585,6 +2697,7 @@ pub fn run() {
         if matches!(event, tauri::RunEvent::Exit) {
             tauri::async_runtime::block_on(coding_lsp::shutdown_pooled_sessions());
             coding_agent_gateway::remove_descriptor();
+            cloud_bridge::stop_gpu_worker();
             let state = app_handle.state::<AppState>();
             for runtime in [&state.agent_runtime, state.runtime.as_ref()] {
                 if let Ok(mut runtime) = runtime.lock() {

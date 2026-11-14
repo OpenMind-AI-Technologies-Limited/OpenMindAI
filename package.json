@@ -13,8 +13,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint .",
+    "test:chat-routing": "node --test tests/chatModeRouting.test.mjs",
     "test:image": "node --experimental-strip-types --test tests/imageGeneration.test.mjs",
-    "test:pdf": "node --test tests/pdfIngestion.test.mjs",
+    "test:pdf": "node --test tests/pdfIngestion.test.mjs tests/pdfWorkBudget.test.mjs",
     "test:regeneration": "node --test tests/regeneration.test.mjs",
     "test:model-inventory": "node --test tests/modelInventory.test.mjs",
     "test:model-actions": "node --test tests/modelActions.test.mjs",
@@ -32,7 +33,12 @@
     "format": "prettier --write .",
     "check:version": "node scripts/check-version-consistency.mjs",
     "check:release": "node scripts/check-release-readiness.mjs",
-    "check:models": "node scripts/check-model-catalog.mjs"
+    "check:models": "node scripts/check-model-catalog.mjs",
+    "test:routing": "node --experimental-strip-types --test tests/executionRouting.test.mjs",
+    "test:chat-search": "node --test tests/chatSearchPaging.test.mjs",
+    "test:project-catalog": "node --test tests/projectCatalogPaging.test.mjs",
+    "test:project-binary": "node --test tests/projectBinaryAttachments.test.mjs",
+    "test:setup-storage": "node --test tests/setupStorageValidation.test.mjs"
   },
   "allowScripts": {
     "esbuild@0.25.12": true
