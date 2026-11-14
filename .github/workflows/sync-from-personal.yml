@@ -1,11 +1,14 @@
-# Personal GitHub -> organization, main branch only.
-# This file belongs in the organization repository, not the personal repository.
+# Sync personal OpenMindAI code into the organization without rewriting history.
+# A normal GITHUB_TOKEN cannot push changes to workflow files.
+# Set ORG_SYNC_TOKEN (PAT with Contents: write + Workflows: write) for workflow-file sync.
 name: Sync personal main
 
 on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -23,25 +26,73 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.ORG_SYNC_TOKEN || github.token }}
 
-      - name: Merge personal main without overwriting organization commits
+      - name: Apply upstream code changes safely
         shell: bash
+        env:
+          HAS_WORKFLOW_TOKEN: ${{ secrets.ORG_SYNC_TOKEN != '' }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git remote add personal 'https://github.com/smshagor-dev/OpenMindAI.git'
+          git remote add personal https://github.com/smshagor-dev/OpenMindAI.git
           git fetch --no-tags personal '+refs/heads/main:refs/remotes/personal/main'
 
-          if git merge-base --is-ancestor refs/remotes/personal/main HEAD; then
-            echo 'Organization already includes personal main.'
-            exit 0
-          fi
-
-          if ! git merge-base HEAD refs/remotes/personal/main >/dev/null; then
-            echo 'Repositories have unrelated history. Refusing to overwrite.' >&2
+          upstream_sha="$(git rev-parse refs/remotes/personal/main)"
+          if ! initial_base="$(git merge-base HEAD "$upstream_sha")"; then
+            echo '::error::Repositories have no common ancestor; refusing to overwrite organization history.'
             exit 1
           fi
 
-          git merge --no-edit --no-ff refs/remotes/personal/main
+          mkdir -p .github/sync-state
+          code_state=.github/sync-state/personal-main-code.sha
+          workflow_state=.github/sync-state/personal-main-workflows.sha
+          code_base="$(cat "$code_state" 2>/dev/null || printf '%s' "$initial_base")"
+
+          if ! git merge-base --is-ancestor "$code_base" "$upstream_sha"; then
+            echo '::error::Personal main history was rewritten. Resolve baseline manually; no force push.'
+            exit 1
+          fi
+
+          # Copy only upstream changes since the last successful code sync.
+          # A three-way patch leaves independent organization work alone and
+          # fails safely if there is a true conflict.
+          git diff --binary "$code_base" "$upstream_sha" -- . \
+            ':(exclude).github/workflows' ':(exclude).github/sync-state' > "$RUNNER_TEMP/code-sync.patch"
+          if [[ -s "$RUNNER_TEMP/code-sync.patch" ]]; then
+            git apply --3way --index "$RUNNER_TEMP/code-sync.patch"
+          fi
+
+          # Workflows require a token with explicit Workflows: write permission.
+          # Track their last synced source commit separately, so earlier changes
+          # are not lost when ORG_SYNC_TOKEN is added later.
+          if [[ "$HAS_WORKFLOW_TOKEN" == 'true' ]]; then
+            workflow_base="$(cat "$workflow_state" 2>/dev/null || printf '%s' "$initial_base")"
+            if ! git merge-base --is-ancestor "$workflow_base" "$upstream_sha"; then
+              echo '::error::Workflow sync baseline is no longer in personal history.'
+              exit 1
+            fi
+            git diff --binary "$workflow_base" "$upstream_sha" -- .github/workflows \
+              ':(exclude).github/workflows/sync-from-personal.yml' > "$RUNNER_TEMP/workflow-sync.patch"
+            if [[ -s "$RUNNER_TEMP/workflow-sync.patch" ]]; then
+              git apply --3way --index "$RUNNER_TEMP/workflow-sync.patch"
+            fi
+            printf '%s\n' "$upstream_sha" > "$workflow_state"
+            git add "$workflow_state"
+          else
+            echo '::warning::Workflow files were not synchronized: configure ORG_SYNC_TOKEN with Workflows: write.'
+          fi
+
+          printf '%s\n' "$upstream_sha" > "$code_state"
+          git add "$code_state"
+
+          if git diff --cached --quiet; then
+            echo 'Organization code is already synchronized.'
+            exit 0
+          fi
+
+          echo "Syncing $(git diff --cached --name-only | wc -l) files from personal $upstream_sha"
+          git commit -m "chore: sync personal OpenMindAI main at $upstream_sha"
           git push origin HEAD:main
+          echo "Synced personal commit: $upstream_sha" >> "$GITHUB_STEP_SUMMARY"
