@@ -102,6 +102,7 @@ mod database_backup;
 mod dataset_context;
 mod dataset_download;
 mod folder_opener;
+mod github_paging;
 mod github_workspace;
 mod google_workspace;
 mod installation_file;
@@ -131,6 +132,7 @@ mod pdf_ocr;
 mod process_ownership;
 mod runtime_guards;
 mod speech_runtime;
+mod text_artifact_save;
 mod vision_batch;
 mod warm_start;
 
